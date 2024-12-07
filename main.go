@@ -1,84 +1,131 @@
 package main
 
 import (
-	"bufio"
-	"encoding/csv"
+	"cligame/link"
+	"encoding/xml"
 	"flag"
 	"fmt"
-	"math/rand"
-	"os"
-	"time"
+	"io"
+	"log"
+	"net/http"
+	"net/url"
+	"strings"
 )
 
+type URL struct {
+	Loc string `xml:"loc"`
+}
+type Sitemap struct {
+	XMLName xml.Name `xml:"urlset"`
+	URLs    []URL    `xml:"url"`
+}
+
 func main() {
-
-	csvFile := flag.String("file", "problems.csv", "Specify the CSV file containing problems")
+	addr := flag.String("addr", "https://gophercises.com", "enter web address")
 	flag.Parse()
-	duration := flag.Int("timer", 3, "Set the timer in secs")
-	flag.Parse()
-
-	read := bufio.NewReader(os.Stdin)
-	fmt.Printf("Type in any key to start timer")
-	fmt.Println()
-	read.ReadString('\n')
-
-	file, err := os.Open(*csvFile)
+	resp, err := http.Get(*addr)
 	if err != nil {
-		panic(err)
-	}
-	defer file.Close()
-
-	reader := csv.NewReader(file)
-	reader.FieldsPerRecord = -1
-	data, err := reader.ReadAll()
-	if err != nil {
-		fmt.Printf("failed to parse the file: %v\n", err)
+		log.Fatal(err)
 	}
 
-	var questions []string
-	var answers []string
+	reqUrl := resp.Request.URL
+	baseUrl := &url.URL{
+		Scheme: reqUrl.Scheme,
+		Host:   reqUrl.Host,
+	}
+	base := baseUrl.String()
 
-	for _, record := range data {
-		if len(record) > 0 {
-			question := record[0]
-			questions = append(questions, question)
+	pages := hrefs(resp.Body, base)
+	for _, l := range pages {
+		fmt.Println(l)
+	}
+}
 
-			length := len(record)
-			answer := record[length-1]
-			answers = append(answers, answer)
+func hrefs(r io.Reader, base string) []string {
+	initialLinks, _ := link.Parse(r)
+	var ret []string
+	for _, l := range initialLinks {
+		switch {
+		case strings.HasPrefix(l.Href, "/"):
+			ret = append(ret, base+l.Href)
+		case strings.HasPrefix(l.Href, "http"):
+			ret = append(ret, l.Href)
 		}
 	}
+	return ret
+}
 
-	// shuffle
-	rand.Shuffle(len(questions), func(i, j int) {
-		questions[i], questions[j] = questions[j], questions[i]
-		answers[i], answers[j] = answers[j], answers[i]
-	})
+//allLinks, visited := crawlWebsite(*addr, initialLinks, nil)
+////log.Println("All Links:", allLinks)
+//_ = allLinks
+//fmt.Printf(generateSitemap(removeDuplicates(visited)))
 
-	timer := time.NewTimer(time.Duration(*duration) * time.Second)
-	var score int
+// visit all urls from gotten list of links
 
-	for i := 0; i < len(questions); i++ {
+// need to figure out a way to determine if a link goes to the same domain or a different one
 
-		fmt.Printf("Question %d: %s\n", i+1, questions[i])
-		answerCh := make(chan string)
-		go func() {
-			var userAnswer string
-			fmt.Scanf("%s\n", &userAnswer)
-			answerCh <- userAnswer
-		}()
-		select {
-		case <-timer.C:
-			fmt.Printf("Your score %d, maximum possible score %d ", score, len(answers))
-			return
-		case userAnswer := <-answerCh:
-			if userAnswer == answers[i] {
-				score++
+// when all links gotten, this data has to be outputted in XML format
+
+func crawlWebsite(addr string, links []link.Link, visitedLinks []string) ([]link.Link, []string) {
+	var allLinks []link.Link
+	visitedSet := make(map[string]bool)
+	for _, v := range visitedLinks {
+		visitedSet[v] = true
+	}
+	for _, l := range links {
+		if strings.HasPrefix(l.Href, "/") {
+			l.Href = addr + l.Href
+		}
+		if strings.HasPrefix(l.Href, addr) && !visitedSet[l.Href] {
+			visitedSet[l.Href] = true
+			visitedLinks = append(visitedLinks, l.Href)
+
+			resp, err := http.Get(l.Href)
+			if err != nil {
+				log.Println("error fetching:", l.Href, err)
+				continue
 			}
+			defer resp.Body.Close()
+
+			newLinks, err := link.Parse(resp.Body)
+			if err != nil {
+				log.Println("error parsing", l.Href, err)
+				continue
+			}
+
+			allLinks = append(allLinks, newLinks...)
+			allLinks, visitedLinks = crawlWebsite(addr, allLinks, visitedLinks)
 		}
+
+		allLinks = append(allLinks, l)
 	}
 
-	fmt.Printf("Your score %d, maximum possible score %d ", score, len(answers))
-	fmt.Println()
+	return allLinks, visitedLinks
+}
 
+func generateSitemap(links []string) string {
+	var urls []URL
+	for _, link := range links {
+		urls = append(urls, URL{Loc: link})
+	}
+	sitemap := Sitemap{URLs: urls}
+
+	output, err := xml.MarshalIndent(sitemap, "", "  ")
+	if err != nil {
+		log.Fatal("Error generating sitemap:", err)
+	}
+	return string(output)
+}
+
+func removeDuplicates(links []string) []string {
+	uniqueUrls := make(map[string]bool)
+	var result []string
+
+	for _, link := range links {
+		if !uniqueUrls[link] {
+			uniqueUrls[link] = true
+			result = append(result, link)
+		}
+	}
+	return result
 }
